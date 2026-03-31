@@ -30,47 +30,76 @@ def review_pr(self, payload: dict) -> None:
         from app.llm import client as llm
         from app.diff_parser import get_changed_lines, parse_diff
 
-        # 1. Fetch diff
+        # 1. Set commit status to pending
+        try:
+            gh.set_commit_status(repo, head_sha, "pending", "AI review in progress…", token)
+        except Exception:
+            pass  # Don't block the review if status API fails
+
+        # 2. Fetch diff
         diff_text = gh.get_pr_diff(repo, pr_number, token)
         if not diff_text.strip():
             log.info("review_pr_empty_diff")
+            gh.set_commit_status(repo, head_sha, "success", "No changes to review", token)
             return
 
-        # 2. Get repo primary language
+        # 3. Get repo primary language
         try:
             languages = gh.get_repo_languages(repo, token)
             repo_language = max(languages, key=languages.get) if languages else "unknown"
         except Exception:
             repo_language = "unknown"
 
-        # 3. Load past accepted comments (few-shot examples) from DB
+        # 4. Load past accepted comments (few-shot examples) from DB
         few_shot_examples = _get_few_shot_examples(repo)
 
-        # 4. Load latest prompt version
+        # 5. Load latest prompt version
         prompt_template = _load_latest_prompt()
 
-        # 5. Call LLM
+        # 6. Call LLM
         comments = llm.review_diff(diff_text, repo_language, few_shot_examples, prompt_template)
         log.info("llm_review_complete", comment_count=len(comments))
 
         if not comments:
             log.info("review_pr_no_comments")
+            gh.set_commit_status(repo, head_sha, "success", "No issues found", token)
             return
 
-        # 6. Filter comments to lines that actually appear in the diff
+        # 7. Filter out ignored file patterns
+        ignore_patterns = _get_ignore_patterns(repo)
+        comments = _filter_ignored_files(comments, ignore_patterns)
+
+        # 8. Filter comments to lines that actually appear in the diff
         changed = get_changed_lines(diff_text)
         valid_comments = [c for c in comments if (c.get("file"), c.get("line")) in changed]
         if not valid_comments:
             log.info("review_pr_no_valid_comments")
+            gh.set_commit_status(repo, head_sha, "success", "No issues found", token)
             return
 
-        # 7. Post review to GitHub
+        # 9. Post inline review comments
         from app import metrics
         github_review_id = gh.post_review(repo, pr_number, head_sha, valid_comments, token)
         metrics.review_posted_total.labels(repo=repo).inc()
         log.info("review_posted", github_review_id=github_review_id)
 
-        # 8. Persist to DB
+        # 10. Post summary comment
+        try:
+            gh.post_summary_comment(repo, pr_number, valid_comments, token)
+        except Exception:
+            pass  # Summary is best-effort
+
+        # 11. Set final commit status
+        error_count = sum(1 for c in valid_comments if c.get("severity") == "error")
+        if error_count:
+            gh.set_commit_status(
+                repo, head_sha, "failure",
+                f"AI review found {error_count} error(s)", token
+            )
+        else:
+            gh.set_commit_status(repo, head_sha, "success", "AI review passed", token)
+
+        # 12. Persist to DB
         prompt_version = _get_active_prompt_version()
         _persist_review(
             repo, pr_number, pr_title, head_sha,
@@ -80,6 +109,11 @@ def review_pr(self, payload: dict) -> None:
 
     except Exception as exc:
         log.error("review_pr_failed", error=str(exc))
+        try:
+            from app.github import client as gh
+            gh.set_commit_status(repo, head_sha, "error", "AI review failed", token)
+        except Exception:
+            pass
         raise self.retry(exc=exc, countdown=60)
 
 
@@ -161,6 +195,33 @@ def _get_active_prompt_version() -> str | None:
         return None
     finally:
         db.close()
+
+
+def _get_ignore_patterns(repo: str) -> list[str]:
+    from app.database import get_sync_db
+    from app.models import IgnorePattern
+    from sqlalchemy import select
+
+    db = get_sync_db()
+    try:
+        rows = db.execute(
+            select(IgnorePattern.pattern).where(IgnorePattern.repo_full_name == repo)
+        ).fetchall()
+        return [r.pattern for r in rows]
+    except Exception:
+        return []
+    finally:
+        db.close()
+
+
+def _filter_ignored_files(comments: list[dict], patterns: list[str]) -> list[dict]:
+    if not patterns:
+        return comments
+    import fnmatch
+    return [
+        c for c in comments
+        if not any(fnmatch.fnmatch(c.get("file", ""), p) for p in patterns)
+    ]
 
 
 def _persist_review(

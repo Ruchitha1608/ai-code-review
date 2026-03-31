@@ -75,3 +75,13 @@ class PromptVersion(Base):
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class IgnorePattern(Base):
+    """Glob patterns for files that should be skipped during review, per repo."""
+    __tablename__ = "ignore_patterns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    repo_full_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    pattern: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

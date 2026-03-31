@@ -20,9 +20,12 @@ Return ONLY a JSON array of objects. Each object must have:
 - "line": the line number in the new file (integer, must be an added line)
 - "severity": one of "info", "warning", "error"
 - "comment": a clear, actionable review comment (string)
+- "fix": a corrected replacement for the flagged line(s) as a string, or null if no simple fix exists
+
+The "fix" field will be posted as a GitHub suggestion block — write only the replacement line(s), not a full diff.
 
 Focus on: bugs, security vulnerabilities, performance problems, and significant code quality issues.
-Ignore minor style issues. Return an empty array [] if there are nothing worth flagging."""
+Ignore minor style issues. Return an empty array [] if there is nothing worth flagging."""
 
 
 def review_diff(

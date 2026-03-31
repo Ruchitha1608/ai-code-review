@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.logging_config import configure_logging
-from app.routers import feedback, health, metrics_router, webhook
+from app.routers import feedback, health, ignore, metrics_router, webhook
 
 configure_logging()
 
@@ -27,3 +27,4 @@ app.include_router(webhook.router)
 app.include_router(feedback.router)
 app.include_router(health.router)
 app.include_router(metrics_router.router)
+app.include_router(ignore.router)
